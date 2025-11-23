@@ -48,8 +48,14 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
     # Make queue mutable by using a list reference
     queue_list = queue if isinstance(queue, list) else list(queue) if queue else []
     
+    # Make shuffle_mode mutable so it can be changed during playback
+    if isinstance(shuffle_mode, list):
+        shuffle_state = shuffle_mode
+    else:
+        shuffle_state = [shuffle_mode]
+    
     # Create a working list (shuffled if needed)
-    if shuffle_mode:
+    if shuffle_state[0]:
         play_order = list(range(len(song_files)))
         random.shuffle(play_order)
     else:
@@ -69,16 +75,23 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
     stop_progress = threading.Event()
     current_pos = [0.0]  # Use list for mutable reference in thread
     
+    song_ended_flag = threading.Event()
+    
     def show_progress():
-        """Thread to update current position"""
+        """Thread to update current position and detect song end"""
         while not stop_progress.is_set():
-            if playing and pygame.mixer.music.get_busy():
-                try:
-                    pos = pygame.mixer.music.get_pos() / 1000.0  # Convert to seconds
-                    if pos >= 0:  # pygame returns -1 when not available
-                        current_pos[0] = pos
-                except:
-                    pass
+            if playing:
+                if pygame.mixer.music.get_busy():
+                    try:
+                        pos = pygame.mixer.music.get_pos() / 1000.0  # Convert to seconds
+                        if pos >= 0:  # pygame returns -1 when not available
+                            current_pos[0] = pos
+                    except:
+                        pass
+                else:
+                    # Song ended while playing
+                    if not song_ended_flag.is_set():
+                        song_ended_flag.set()
             time.sleep(0.5)
     
     while True:
@@ -86,7 +99,7 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
         if play_index >= len(play_order):
             if repeat_mode == "all":
                 play_index = 0
-                if shuffle_mode:
+                if shuffle_state[0]:
                     random.shuffle(play_order)
             else:
                 print("\nEnd of playlist")
@@ -146,12 +159,13 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
         
         # Show commands
         print("Commands: [Space] Play/Pause, [S]top, [Q]uit, [+] Volume Up, [-] Volume Down")
-        print("         [N]ext, [B]ack, [R]epeat, [T]ime, [I]nfo")
+        print("         [N]ext, [B]ack, [R]epeat, [T]ime, [I]nfo, [H]uffle")
         if queue_list:
             print(f"         Queue: {len(queue_list)} song(s) waiting")
         
         # Start progress thread to track position
         stop_progress.clear()
+        song_ended_flag.clear()
         current_pos[0] = 0.0
         progress_thread = threading.Thread(target=show_progress, daemon=True)
         progress_thread.start()
@@ -163,12 +177,40 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
         
         # Command loop
         while pygame.mixer.music.get_busy() or not playing:
+            # Check if song ended (non-blocking check before input)
+            if song_ended_flag.is_set() and playing:
+                # Song ended naturally, handle auto-advance
+                stop_progress.set()
+                if repeat_mode == "one":
+                    # Restart current song
+                    pygame.mixer.music.load(file_path)
+                    pygame.mixer.music.play()
+                    current_pos[0] = 0.0
+                    song_ended_flag.clear()
+                    continue
+                else:
+                    # Auto-advance to next song
+                    # Check queue first
+                    if queue_list:
+                        current_index = queue_list.pop(0)
+                        # Find this index in play_order
+                        if current_index in play_order:
+                            play_index = play_order.index(current_index)
+                        else:
+                            play_index += 1
+                    else:
+                        play_index += 1
+                    break  # Break to load next song
+            
             try:
                 command = input("\n> ").strip().upper()
             except (EOFError, KeyboardInterrupt):
                 pygame.mixer.music.stop()
                 stop_progress.set()
                 return ("quit", current_index)
+            
+            # Clear the flag if it was set (we're processing a command now)
+            song_ended_flag.clear()
             
             if command == "" or command == " " or command == "P":
                 # Play/Pause (spacebar or P)
@@ -235,6 +277,21 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
                     print("Repeat: Off")
             elif command == "T" or command == "TIME":
                 display_time_position()
+            elif command == "H" or command == "SHUFFLE":
+                shuffle_state[0] = not shuffle_state[0]
+                if shuffle_state[0]:
+                    # Reshuffle the remaining songs
+                    remaining_indices = play_order[play_index+1:]
+                    random.shuffle(remaining_indices)
+                    play_order = play_order[:play_index+1] + remaining_indices
+                    print(f"Shuffle: ON")
+                else:
+                    # Reorder to sequential from current position
+                    current_song = play_order[play_index]
+                    play_order = list(range(len(song_files)))
+                    if current_song in play_order:
+                        play_index = play_order.index(current_song)
+                    print(f"Shuffle: OFF")
             elif command == "I" or command == "INFO":
                 print(f"\nFile: {filepath}")
                 if metadata:
@@ -245,30 +302,35 @@ def play_music(folder, song_files, current_index, shuffle_mode=False, repeat_mod
                         print(f"Length: {format_time(metadata['length'])}")
                 print(f"Volume: {int(volume * 100)}%")
                 print(f"Repeat: {repeat_mode.capitalize()}")
-                print(f"Shuffle: {'On' if shuffle_mode else 'Off'}")
+                print(f"Shuffle: {'On' if shuffle_state[0] else 'Off'}")
                 # Also show current position in info
                 if playing and pygame.mixer.music.get_busy():
                     print()
                     display_time_position()
             else:
                 print("Invalid command. Type [I]nfo for help.")
-        
-        # Song ended naturally
-        if not pygame.mixer.music.get_busy() and playing:
-            if repeat_mode == "one":
-                # Restart current song
-                continue
-            else:
-                # Check queue first
-                if queue_list:
-                    current_index = queue_list.pop(0)
-                    # Find this index in play_order
-                    if current_index in play_order:
-                        play_index = play_order.index(current_index)
+            
+            # Check if song ended after command (for auto-advance)
+            if not pygame.mixer.music.get_busy() and playing:
+                if repeat_mode == "one":
+                    # Restart current song
+                    pygame.mixer.music.load(file_path)
+                    pygame.mixer.music.play()
+                    current_pos[0] = 0.0
+                else:
+                    # Auto-advance to next song
+                    stop_progress.set()
+                    # Check queue first
+                    if queue_list:
+                        current_index = queue_list.pop(0)
+                        # Find this index in play_order
+                        if current_index in play_order:
+                            play_index = play_order.index(current_index)
+                        else:
+                            play_index += 1
                     else:
                         play_index += 1
-                else:
-                    play_index += 1
+                    break  # Break to load next song
 def load_saved_position():
     """Load last played song position from config file"""
     config_file = Path("wavrun_config.json")
@@ -351,7 +413,7 @@ def main():
             current_index = saved_index
             print(f"Resuming from: {song_files[current_index]}")
     
-    shuffle_mode = False
+    shuffle_mode = [False]  # Use list for mutable reference
     queue = []
     search_term = ""
     filtered_songs = song_files
@@ -363,7 +425,7 @@ def main():
         
         # Show current mode
         mode_info = []
-        if shuffle_mode:
+        if shuffle_mode[0]:
             mode_info.append("SHUFFLE")
         if queue:
             mode_info.append(f"QUEUE({len(queue)})")
@@ -413,8 +475,8 @@ def main():
             break
         
         elif command == "S" or command == "SHUFFLE":
-            shuffle_mode = not shuffle_mode
-            print(f"Shuffle mode: {'ON' if shuffle_mode else 'OFF'}")
+            shuffle_mode[0] = not shuffle_mode[0]
+            print(f"Shuffle mode: {'ON' if shuffle_mode[0] else 'OFF'}")
             continue
         
         elif command.startswith("/"):
