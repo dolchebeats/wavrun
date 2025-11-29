@@ -1,3 +1,5 @@
-pygame>=2.0.0
+python-vlc>=3.0.0
 mutagen>=1.45.0
+textual>=6.6.0
+rich>=14.2.0
 
