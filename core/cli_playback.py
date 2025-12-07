@@ -134,12 +134,19 @@ class wavrun(App):
             title = item.get("title") or os.path.basename(item["path"])
             artist = item.get("artist") or "Unknown"
             label = f"{i + 1:02d}. {title} — {artist}"
-            node = ListItem(Label(label), id=f"song_{i}")
+            node = ListItem(Label(label))
+            node.song_index = i
+            node.song = item
             self.list_view.append(node)
 
     async def on_list_view_selected(self, message: ListView.Selected):
-        id_str = message.item.id
-        idx = int(id_str.split("_")[1])
+        idx = getattr(message.item, "song_index", None)
+        if idx is None:
+            id_str = getattr(message.item, "id", "")
+            try:
+                idx = int(id_str.split("_")[1])
+            except Exception:
+                return
         await self.action_play_index(idx)
 
     async def action_play_index(self, idx:int):
