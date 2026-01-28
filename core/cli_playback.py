@@ -4,7 +4,6 @@ from textual.widgets import Header, Footer, Static, Button, Input, ListView, Lis
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.message import Message
-from textual import events
 from core.dialogs import FolderDialog
 from textual import events
 from textual import worker
@@ -145,8 +144,7 @@ class wavrun(App):
             id_str = getattr(message.item, "id", "")
             try:
                 idx = int(id_str.split("_")[1])
-            except Exception:
-                return
+            except Exception:                return
         await self.action_play_index(idx)
 
     async def action_play_index(self, idx:int):
@@ -162,7 +160,7 @@ class wavrun(App):
             self.status.update("File missing")
             return
         self.player.stop()
-        time.sleep(0.02)
+        asyncio.sleep(0.02)
         self.player.load(path)
         self.player.add_end_callback(lambda: self.song_end_flag.set())
         self.player.play()
@@ -176,6 +174,20 @@ class wavrun(App):
             self.progress_updater = threading.Thread(target=self._progress_loop, daemon=True)
             self.progress_updater.start()
 
+    def _on_song_end(self):
+        self.call_from_thread(self._handle_song_end)
+
+    def _handle_song_end(self):
+        try:
+            # schedule the async method; it will run in the app's event loop
+            asyncio.create_task(self.action_next())
+        except Exception:
+        # fallback: if scheduler not available for some reason, set the flag so
+        # progress loop can pick it up (if your implementation uses song_end_flag)
+            try:
+                self.song_end_flag.set()
+            except Exception:
+                pass
 
     async def action_play_pause(self):
         if self.playing:

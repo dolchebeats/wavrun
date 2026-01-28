@@ -1,8 +1,8 @@
-# core/config.py
-import json
+# core/config.py 
+import json 
 from pathlib import Path
 
-CONFIG_FILE = Path("config.json")
+CONFIG_FILE = Path("config/config.json")
 
 def load_config():
     if CONFIG_FILE.exists():

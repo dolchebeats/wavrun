@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from .metadata import get_metadata
 
-PLAYLIST_FILE = Path("playlist.json")
+PLAYLIST_FILE = Path("config/playlist.json")
 
 def scan_folder(folder, exts=None):
     if exts is None:
