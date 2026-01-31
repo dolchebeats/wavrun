@@ -160,7 +160,7 @@ class wavrun(App):
             self.status.update("File missing")
             return
         self.player.stop()
-        asyncio.sleep(0.02)
+        time.sleep(0.02)
         self.player.load(path)
         self.player.add_end_callback(lambda: self.song_end_flag.set())
         self.player.play()
@@ -178,16 +178,7 @@ class wavrun(App):
         self.call_from_thread(self._handle_song_end)
 
     def _handle_song_end(self):
-        try:
-            # schedule the async method; it will run in the app's event loop
-            asyncio.create_task(self.action_next())
-        except Exception:
-        # fallback: if scheduler not available for some reason, set the flag so
-        # progress loop can pick it up (if your implementation uses song_end_flag)
-            try:
-                self.song_end_flag.set()
-            except Exception:
-                pass
+        self.song_end_flag.set()
 
     async def action_play_pause(self):
         if self.playing:

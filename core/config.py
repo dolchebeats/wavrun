@@ -15,6 +15,7 @@ def load_config():
     return {}
 
 def save_config(new_cfg: dict):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     cfg = load_config()  # always start with existing config
     cfg.update(new_cfg)   # merge new values
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
