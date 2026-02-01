@@ -53,23 +53,42 @@ class wavrun(App):
         super().__init__()
         self.player = VLCMusic()
         self.cfg = load_config()
-        self.current_index = self.cfg.get("last_index",0)
-        self.last_index = self.current_index
+        
+        # NEW: Track currently playing song by path instead of index
+        self.current_song_path = None
+        self.last_index = self.cfg.get("last_index", 0)
+        
         self.playing = False
         self.paused = False
 
         self.music_dir = self.cfg.get("music_dir")
-        self.last_index = self.cfg.get("last_index", 0)
         self.playlist = load_playlist_file()
-        self.full_playlist = self.playlist.copy()  # NEW: Keep original playlist
+        self.full_playlist = self.playlist.copy()  # Keep original playlist
         self.shuffle = False
         self.repeat_mode = "off"  # off|one|all
         self.song_end_flag = threading.Event()
         self.progress_updater = None
         self.stop_threads = False
-        self._lock = threading.Lock()  # NEW: Thread safety
+        self._lock = threading.Lock()  # Thread safety
 
 
+
+    def _get_current_index(self):
+        """Get the index of currently playing song in the current (possibly filtered) playlist.
+        Returns -1 if not found."""
+        if not self.current_song_path:
+            return -1
+        for i, song in enumerate(self.playlist):
+            if song["path"] == self.current_song_path:
+                return i
+        return -1
+    
+    def _find_song_in_full_playlist(self, path):
+        """Find a song by path in the full playlist. Returns index or -1."""
+        for i, song in enumerate(self.full_playlist):
+            if song["path"] == path:
+                return i
+        return -1
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -124,19 +143,21 @@ class wavrun(App):
                 self.status.update("No playlist")
                 try:
                     self.playlist = scan_folder(self.music_dir)
-                    self.full_playlist = self.playlist.copy()  # NEW: Store full playlist
+                    self.full_playlist = self.playlist.copy()
                     self.status.update("Initial scan completed")
                 except Exception as e:
                     self.status.update("Initial scan failed...")
                     return
         # populate playlist
         self._render_playlist()
-        # resume last index if available
-        if self.playlist and 0 <= self.last_index < len(self.playlist):
-            self.current_index = self.last_index
-            # don't auto-play; just highlight
-            self.list_view.index = self.current_index
-            self._highlight_current()
+        
+        # resume last index if available - convert to path-based tracking
+        if self.playlist and 0 <= self.last_index < len(self.full_playlist):
+            self.current_song_path = self.full_playlist[self.last_index]["path"]
+            # Highlight it if it's in the current view
+            current_idx = self._get_current_index()
+            if current_idx >= 0:
+                self.list_view.index = current_idx
 
     def _render_playlist(self):
         self.list_view.clear()
@@ -155,7 +176,7 @@ class wavrun(App):
             id_str = getattr(message.item, "id", "")
             try:
                 idx = int(id_str.split("_")[1])
-            except Exception:                
+            except Exception:
                 return
         await self.action_play_index(idx)
 
@@ -163,20 +184,24 @@ class wavrun(App):
         # load into VLC and play
         if idx < 0 or idx >= len(self.playlist):
             return
-        self.current_index = idx
+        # Set current song by path, not index
+        self.current_song_path = self.playlist[idx]["path"]
         self._play_index(idx)
 
     def _play_index(self, idx:int, from_thread=False):
         """Play song at given index. Thread-safe.
         
         Args:
-            idx: Index of song to play
+            idx: Index of song to play IN CURRENT PLAYLIST (may be filtered)
             from_thread: True if called from background thread, False if from UI thread
         """
         if idx < 0 or idx >= len(self.playlist):
             return
             
         path = self.playlist[idx]["path"]
+        # Update currently playing song path
+        self.current_song_path = path
+        
         logging.debug(f"_play_index called for idx={idx}, path={path}, from_thread={from_thread}")
         
         if not os.path.exists(path):
@@ -236,8 +261,9 @@ class wavrun(App):
             self.paused = True
             self.btn_play.label = "▶"
         else:
-            if self.current_index == -1 and self.playlist:
-                self.current_index = 0
+            if not self.current_song_path and self.playlist:
+                # No song playing - start with first song in current playlist
+                self.current_song_path = self.playlist[0]["path"]
                 self._play_index(0)
             else:
                 self.player.unpause()
@@ -248,10 +274,13 @@ class wavrun(App):
     async def action_next(self):
         if not self.playlist:
             return
+            
+        current_idx = self._get_current_index()
+        
         if self.shuffle:
             idx = random.randrange(len(self.playlist))
         else:
-            idx = self.current_index + 1
+            idx = current_idx + 1 if current_idx >= 0 else 0
             if idx >= len(self.playlist):
                 if self.repeat_mode == "all":
                     idx = 0
@@ -261,7 +290,8 @@ class wavrun(App):
                     self.playing = False
                     self.btn_play.label = "▶"
                     return
-        self.current_index = idx
+        
+        self.current_song_path = self.playlist[idx]["path"]
         self._play_index(idx)
 
     async def action_prev(self):
@@ -271,8 +301,13 @@ class wavrun(App):
         if pos and pos > 3000:
             self.player.set_time(0)
             return
-        idx = self.current_index - 1 if self.current_index > 0 else (len(self.playlist)-1 if self.repeat_mode=="all" else 0)
-        self.current_index = idx
+            
+        current_idx = self._get_current_index()
+        if current_idx < 0:
+            current_idx = 0
+            
+        idx = current_idx - 1 if current_idx > 0 else (len(self.playlist)-1 if self.repeat_mode=="all" else 0)
+        self.current_song_path = self.playlist[idx]["path"]
         self._play_index(idx)
 
     async def action_shuffle(self):
@@ -323,13 +358,12 @@ class wavrun(App):
         self.music_dir = path
         try:
             self.playlist = scan_folder(self.music_dir)
-            self.full_playlist = self.playlist.copy()  # NEW: Update full playlist
+            self.full_playlist = self.playlist.copy()
         except Exception as e:
             return
         await self.action_save()
-        self.current_index = 0
+        self.current_song_path = None  # Reset currently playing song
         self._render_playlist()
-        self._highlight_current()
         return
 
     async def action_quit(self):
@@ -339,36 +373,68 @@ class wavrun(App):
         # Stop threads first
         self.stop_threads = True
         if self.progress_updater and self.progress_updater.is_alive():
-            self.progress_updater.join(timeout=1.0)  # NEW: Wait for thread to finish
+            self.progress_updater.join(timeout=1.0)  # Wait for thread to finish
         
-        # Save both folder and last_index
-        self.cfg["last_index"] = self.current_index
+        # Save current song position by finding it in full playlist
+        if self.current_song_path:
+            idx = self._find_song_in_full_playlist(self.current_song_path)
+            self.cfg["last_index"] = idx if idx >= 0 else 0
+        else:
+            self.cfg["last_index"] = 0
+            
         self.cfg["music_dir"] = self.music_dir
         save_config(self.cfg)
 
-        save_playlist_file(self.full_playlist)  # NEW: Save full playlist, not filtered
+        save_playlist_file(self.full_playlist)
         self.player.stop()
         self.exit()
 
     async def action_save(self):
-        # Save both folder and last_index
-        self.cfg["last_index"] = self.current_index
+        # Save current song position by finding it in full playlist
+        if self.current_song_path:
+            idx = self._find_song_in_full_playlist(self.current_song_path)
+            self.cfg["last_index"] = idx if idx >= 0 else 0
+        else:
+            self.cfg["last_index"] = 0
+            
         self.cfg["music_dir"] = self.music_dir
         save_config(self.cfg)
 
-        save_playlist_file(self.full_playlist)  # NEW: Save full playlist
+        save_playlist_file(self.full_playlist)
 
     def _update_ui_playing(self):
-        item = self.playlist[self.current_index]
-        self.lbl_title.update(item.get("title"))
-        self.lbl_artist.update(item.get("artist"))
-        self.btn_play.label = "⏸"
-        self._highlight_current()
+        logging.debug(f"_update_ui_playing called, current_song_path: {self.current_song_path}")
+        
+        # Find the song in current playlist by path
+        current_idx = self._get_current_index()
+        logging.debug(f"Current song index in playlist: {current_idx}")
+        
+        if current_idx >= 0:
+            item = self.playlist[current_idx]
+            logging.debug(f"Updating UI with song from current playlist: {item.get('title')}")
+            self.lbl_title.update(item.get("title"))
+            self.lbl_artist.update(item.get("artist"))
+            self.btn_play.label = "⏸"
+            self._highlight_current()
+        else:
+            # Song not in filtered playlist - show it anyway
+            idx_in_full = self._find_song_in_full_playlist(self.current_song_path)
+            logging.debug(f"Song not in current playlist, index in full playlist: {idx_in_full}")
+            if idx_in_full >= 0:
+                item = self.full_playlist[idx_in_full]
+                logging.debug(f"Updating UI with song from full playlist: {item.get('title')}")
+                self.lbl_title.update(item.get("title") + " (not in filter)")
+                self.lbl_artist.update(item.get("artist"))
+                self.btn_play.label = "⏸"
+            else:
+                logging.warning(f"Song not found in either playlist!")
 
     def _highlight_current(self):
-        # set list index focus
+        # set list index focus to current song if it's in the filtered playlist
         try:
-            self.list_view.index = self.current_index
+            current_idx = self._get_current_index()
+            if current_idx >= 0:
+                self.list_view.index = current_idx
         except Exception:
             pass
 
@@ -395,8 +461,20 @@ class wavrun(App):
                     # Handle repeat/shuffle logic
                     if self.repeat_mode == "one":
                         logging.debug("Repeat mode ONE - replaying same song")
-                        # Repeat current song
-                        self._play_index(self.current_index, from_thread=True)
+                        # Repeat current song - find it in current playlist
+                        current_idx = self._get_current_index()
+                        if current_idx >= 0:
+                            self._play_index(current_idx, from_thread=True)
+                        else:
+                            # Not in filtered playlist, use full playlist
+                            idx_full = self._find_song_in_full_playlist(self.current_song_path)
+                            if idx_full >= 0:
+                                def replay():
+                                    old_pl = self.playlist
+                                    self.playlist = self.full_playlist
+                                    self._play_index(idx_full, from_thread=True)
+                                    self.playlist = old_pl
+                                self.call_from_thread(replay)
                     else:
                         logging.debug(f"Advancing to next (shuffle={self.shuffle}, repeat={self.repeat_mode})")
                         # Advance to next song
@@ -410,38 +488,75 @@ class wavrun(App):
         logging.debug("Progress loop exited")
 
     def _advance_to_next(self):
-        """Advance to next song based on shuffle/repeat settings. Called from thread."""
-        logging.debug(f"_advance_to_next called: current_index={self.current_index}, playlist_len={len(self.playlist)}")
+        """Advance to next song based on shuffle/repeat settings. Called from thread.
+        
+        IMPORTANT: When auto-advancing, we use the FULL playlist, not the filtered one.
+        This ensures continuous playback even when a search filter is active.
+        """
+        if not self.current_song_path:
+            logging.debug("No current song to advance from")
+            return
+            
+        # Find current song in FULL playlist
+        current_idx_full = self._find_song_in_full_playlist(self.current_song_path)
+        logging.debug(f"_advance_to_next: current song at full_playlist[{current_idx_full}]")
+        
+        if current_idx_full < 0:
+            logging.warning("Current song not found in full playlist!")
+            return
         
         if self.shuffle:
-            # Random song
-            next_idx = random.randrange(len(self.playlist))
-            logging.debug(f"Shuffle mode: selected random index {next_idx}")
-            self.current_index = next_idx
-            self._play_index(next_idx, from_thread=True)
-        else:
-            # Sequential
-            next_idx = self.current_index + 1
-            logging.debug(f"Sequential mode: next_idx={next_idx}")
+            # Random song from FULL playlist
+            next_idx_full = random.randrange(len(self.full_playlist))
+            logging.debug(f"Shuffle mode: selected random index {next_idx_full} from full playlist")
+            next_song_path = self.full_playlist[next_idx_full]["path"]
             
-            if next_idx >= len(self.playlist):
+        else:
+            # Sequential in FULL playlist
+            next_idx_full = current_idx_full + 1
+            logging.debug(f"Sequential mode: next_idx_full={next_idx_full}")
+            
+            if next_idx_full >= len(self.full_playlist):
                 if self.repeat_mode == "all":
-                    # Loop back to start
-                    logging.debug("End of playlist - looping to start (repeat all)")
-                    self.current_index = 0
-                    self._play_index(0, from_thread=True)
+                    # Loop back to start of FULL playlist
+                    logging.debug("End of full playlist - looping to start (repeat all)")
+                    next_idx_full = 0
+                    next_song_path = self.full_playlist[0]["path"]
                 else:
                     # Stop playback
-                    logging.debug("End of playlist - stopping playback")
+                    logging.debug("End of full playlist - stopping playback")
                     self.player.stop()
                     with self._lock:
                         self.playing = False
-                    self.call_from_thread(lambda: setattr(self.btn_play, "label", "▶"))
+                    self.btn_play.label = "▶"  # Already on main thread
+                    return
             else:
-                # Play next song
-                logging.debug(f"Playing next song at index {next_idx}")
-                self.current_index = next_idx
-                self._play_index(next_idx, from_thread=True)
+                next_song_path = self.full_playlist[next_idx_full]["path"]
+        
+        # Now find this song in the CURRENT (possibly filtered) playlist
+        next_idx_current = -1
+        for i, song in enumerate(self.playlist):
+            if song["path"] == next_song_path:
+                next_idx_current = i
+                break
+        
+        if next_idx_current >= 0:
+            # Song is in current filtered playlist - play it
+            logging.debug(f"Next song found in current playlist at index {next_idx_current}")
+            self.current_song_path = next_song_path
+            # We're already on main thread (via call_from_thread), so from_thread=False
+            self._play_index(next_idx_current, from_thread=False)
+        else:
+            # Song not in filtered playlist - need to play from full playlist
+            logging.debug(f"Next song NOT in filtered playlist - playing from full")
+            self.current_song_path = next_song_path
+            
+            # Temporarily switch to full playlist
+            old_playlist = self.playlist
+            self.playlist = self.full_playlist
+            # We're already on main thread, so from_thread=False
+            self._play_index(next_idx_full, from_thread=False)
+            self.playlist = old_playlist
 
     def _update_progress_ui(self, pos_s, len_s, pct):
         self.lbl_pos.update(format_time(pos_s))
@@ -478,9 +593,9 @@ class wavrun(App):
         else:
             # Filter by title or artist
             self.playlist = [
-                p for p in self.full_playlist 
-                if term in (p.get("title","").lower() + " " + 
-                           p.get("artist","").lower() + " " + 
+                p for p in self.full_playlist
+                if term in (p.get("title","").lower() + " " +
+                           p.get("artist","").lower() + " " +
                            os.path.basename(p.get("path","")).lower())
             ]
         self._render_playlist()
