@@ -1,4 +1,3 @@
-# core/cli_playback.py
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, Button, Input, ListView, ListItem, Label, ProgressBar
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -12,6 +11,15 @@ import asyncio
 
 
 import threading, time, random, os
+import logging
+
+# Set up file logging
+logging.basicConfig(
+    filename='wavrun_debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s [%(threadName)s] %(message)s',
+    filemode='w'  # Overwrite log each time
+)
 
 from .player import VLCMusic
 from .playlist import load_playlist_file, save_playlist_file, scan_folder
@@ -38,6 +46,7 @@ class wavrun(App):
         ("j", "down", "Down"),
         ("k", "up", "Up"),
         ("g", "change_music_folder", "Change Folder"),
+        ("escape", "clear_search", "Clear Search"),  # NEW: Escape to clear search
     ]
 
     def __init__(self):
@@ -52,11 +61,13 @@ class wavrun(App):
         self.music_dir = self.cfg.get("music_dir")
         self.last_index = self.cfg.get("last_index", 0)
         self.playlist = load_playlist_file()
+        self.full_playlist = self.playlist.copy()  # NEW: Keep original playlist
         self.shuffle = False
         self.repeat_mode = "off"  # off|one|all
         self.song_end_flag = threading.Event()
         self.progress_updater = None
         self.stop_threads = False
+        self._lock = threading.Lock()  # NEW: Thread safety
 
 
 
@@ -95,10 +106,9 @@ class wavrun(App):
                     self.btn_repeat = Button("Repeat: Off", id="repeat")
                     yield self.btn_repeat
         # footer with search + status
-        # In your compose() method, replace the old bottom row with this:
         with Horizontal(id="bottom"):
             # Search input takes most of the space
-            self.search = Input(placeholder="Search (press Enter)", id="search")
+            self.search = Input(placeholder="Search (type to filter, Esc to clear)", id="search")
             yield self.search
 
             # Fixed-width status label
@@ -114,6 +124,7 @@ class wavrun(App):
                 self.status.update("No playlist")
                 try:
                     self.playlist = scan_folder(self.music_dir)
+                    self.full_playlist = self.playlist.copy()  # NEW: Store full playlist
                     self.status.update("Initial scan completed")
                 except Exception as e:
                     self.status.update("Initial scan failed...")
@@ -144,7 +155,8 @@ class wavrun(App):
             id_str = getattr(message.item, "id", "")
             try:
                 idx = int(id_str.split("_")[1])
-            except Exception:                return
+            except Exception:                
+                return
         await self.action_play_index(idx)
 
     async def action_play_index(self, idx:int):
@@ -154,25 +166,62 @@ class wavrun(App):
         self.current_index = idx
         self._play_index(idx)
 
-    def _play_index(self, idx:int):
-        path = self.playlist[idx]["path"]
-        if not os.path.exists(path):
-            self.status.update("File missing")
+    def _play_index(self, idx:int, from_thread=False):
+        """Play song at given index. Thread-safe.
+        
+        Args:
+            idx: Index of song to play
+            from_thread: True if called from background thread, False if from UI thread
+        """
+        if idx < 0 or idx >= len(self.playlist):
             return
-        self.player.stop()
-        time.sleep(0.02)
-        self.player.load(path)
-        self.player.add_end_callback(lambda: self.song_end_flag.set())
-        self.player.play()
-        # wait briefly then pause to mimic initial paused behavior? we will start playing
-        # Update UI
-        self.playing = True
-        self.paused = False
-        self.call_after_refresh(self._update_ui_playing)
+            
+        path = self.playlist[idx]["path"]
+        logging.debug(f"_play_index called for idx={idx}, path={path}, from_thread={from_thread}")
+        
+        if not os.path.exists(path):
+            if from_thread:
+                self.call_from_thread(lambda: self.status.update("File missing"))
+                self.call_from_thread(self._skip_to_next)
+            else:
+                self.status.update("File missing")
+                asyncio.create_task(self.action_next())
+            return
+            
+        with self._lock:
+            self.player.stop()
+            time.sleep(0.02)
+            self.player.load(path)
+            
+            # Register callback BEFORE playing
+            def on_end():
+                logging.debug("End callback triggered by VLC!")
+                self.song_end_flag.set()
+            
+            self.player.add_end_callback(on_end)
+            logging.debug(f"End callback registered")
+            
+            self.player.play()
+            
+            # Update state
+            self.playing = True
+            self.paused = False
+            
+        # Update UI - use call_from_thread only if we're in a background thread
+        if from_thread:
+            self.call_from_thread(self._update_ui_playing)
+        else:
+            self._update_ui_playing()
+        
         # start background updater if not running
         if not self.progress_updater or not self.progress_updater.is_alive():
             self.progress_updater = threading.Thread(target=self._progress_loop, daemon=True)
             self.progress_updater.start()
+            logging.debug("Progress updater thread started")
+
+    def _skip_to_next(self):
+        """Called when a file is missing - skip to next song"""
+        asyncio.create_task(self.action_next())
 
     def _on_song_end(self):
         self.call_from_thread(self._handle_song_end)
@@ -242,7 +291,15 @@ class wavrun(App):
             self.btn_repeat.label = "Repeat: Off"
 
     async def action_focus_search(self):
-        self.call_after_refresh(self.set_focus, self.search)
+        self.search.focus()
+
+    async def action_clear_search(self):
+        """NEW: Clear search and restore full playlist"""
+        self.search.value = ""
+        self.playlist = self.full_playlist.copy()
+        self._render_playlist()
+        if self.list_view.index is not None:
+            self._highlight_current()
 
     async def action_down(self):
         self.list_view.action_cursor_down()
@@ -262,33 +319,34 @@ class wavrun(App):
 
     async def apply_folder(self, path):
         if not path:
-            #self.status.update("Folder change cancelled.")
             return
-        #self.status.update(f"DEBUG: path repr={repr(path)}")
         self.music_dir = path
         try:
             self.playlist = scan_folder(self.music_dir)
+            self.full_playlist = self.playlist.copy()  # NEW: Update full playlist
         except Exception as e:
-            #self.status.update(f"Error scanning folder: {e}")
             return
         await self.action_save()
         self.current_index = 0
         self._render_playlist()
         self._highlight_current()
-        #self.status.update(f"Loaded: {self.music_dir}")
         return
 
     async def action_quit(self):
         await self.action_save_and_exit()
 
     async def action_save_and_exit(self):
+        # Stop threads first
+        self.stop_threads = True
+        if self.progress_updater and self.progress_updater.is_alive():
+            self.progress_updater.join(timeout=1.0)  # NEW: Wait for thread to finish
+        
         # Save both folder and last_index
         self.cfg["last_index"] = self.current_index
         self.cfg["music_dir"] = self.music_dir
         save_config(self.cfg)
 
-        save_playlist_file(self.playlist)
-        self.stop_threads = True
+        save_playlist_file(self.full_playlist)  # NEW: Save full playlist, not filtered
         self.player.stop()
         self.exit()
 
@@ -298,7 +356,7 @@ class wavrun(App):
         self.cfg["music_dir"] = self.music_dir
         save_config(self.cfg)
 
-        save_playlist_file(self.playlist)
+        save_playlist_file(self.full_playlist)  # NEW: Save full playlist
 
     def _update_ui_playing(self):
         item = self.playlist[self.current_index]
@@ -315,8 +373,11 @@ class wavrun(App):
             pass
 
     def _progress_loop(self):
+        """Background thread for updating progress and handling song end events"""
+        logging.debug("Progress loop started")
         while not self.stop_threads:
             try:
+                # Update progress if playing
                 if self.playing:
                     pos_ms = self.player.get_pos()
                     len_ms = self.player.get_length()
@@ -325,43 +386,71 @@ class wavrun(App):
                     pct = int((pos_s/len_s)*100) if len_s and len_s>0 else 0
                     # update UI
                     self.call_from_thread(lambda: self._update_progress_ui(pos_s, len_s, pct))
-                # check end event
+                
+                # FIXED: Check end event and handle song advancement
                 if self.song_end_flag.is_set():
+                    logging.debug("Song end flag detected!")
                     self.song_end_flag.clear()
-                    # handle repeat/shuffle
+                    
+                    # Handle repeat/shuffle logic
                     if self.repeat_mode == "one":
-                        self._play_index(self.current_index)
+                        logging.debug("Repeat mode ONE - replaying same song")
+                        # Repeat current song
+                        self._play_index(self.current_index, from_thread=True)
                     else:
-                        # next
-                        if self.shuffle:
-                            self.current_index = random.randrange(len(self.playlist))
-                            self._play_index(self.current_index)
-                        else:
-                            next_idx = self.current_index + 1
-                            if next_idx >= len(self.playlist):
-                                if self.repeat_mode == "all":
-                                    self.current_index = 0
-                                    self._play_index(self.current_index)
-                                else:
-                                    # stop
-                                    self.player.stop()
-                                    self.playing = False
-                                    self.call_from_thread(lambda: setattr(self.btn_play, "label", "▶"))
-                            else:
-                                self.current_index = next_idx
-                                self._play_index(self.current_index)
+                        logging.debug(f"Advancing to next (shuffle={self.shuffle}, repeat={self.repeat_mode})")
+                        # Advance to next song
+                        self.call_from_thread(self._advance_to_next)
+                        
                 time.sleep(0.2)
-            except Exception:
+            except Exception as e:
+                # Log errors but keep thread alive
+                logging.exception(f"Progress loop error: {e}")
                 time.sleep(0.5)
+        logging.debug("Progress loop exited")
+
+    def _advance_to_next(self):
+        """Advance to next song based on shuffle/repeat settings. Called from thread."""
+        logging.debug(f"_advance_to_next called: current_index={self.current_index}, playlist_len={len(self.playlist)}")
+        
+        if self.shuffle:
+            # Random song
+            next_idx = random.randrange(len(self.playlist))
+            logging.debug(f"Shuffle mode: selected random index {next_idx}")
+            self.current_index = next_idx
+            self._play_index(next_idx, from_thread=True)
+        else:
+            # Sequential
+            next_idx = self.current_index + 1
+            logging.debug(f"Sequential mode: next_idx={next_idx}")
+            
+            if next_idx >= len(self.playlist):
+                if self.repeat_mode == "all":
+                    # Loop back to start
+                    logging.debug("End of playlist - looping to start (repeat all)")
+                    self.current_index = 0
+                    self._play_index(0, from_thread=True)
+                else:
+                    # Stop playback
+                    logging.debug("End of playlist - stopping playback")
+                    self.player.stop()
+                    with self._lock:
+                        self.playing = False
+                    self.call_from_thread(lambda: setattr(self.btn_play, "label", "▶"))
+            else:
+                # Play next song
+                logging.debug(f"Playing next song at index {next_idx}")
+                self.current_index = next_idx
+                self._play_index(next_idx, from_thread=True)
 
     def _update_progress_ui(self, pos_s, len_s, pct):
         self.lbl_pos.update(format_time(pos_s))
         if len_s:
             self.lbl_len.update(format_time(len_s))
-            self.progress.update(pct)
+            self.progress.progress = pct  # FIXED: Set attribute instead of calling update()
         else:
             self.lbl_len.update("??:??")
-            self.progress.update(0)
+            self.progress.progress = 0  # FIXED: Set attribute instead of calling update()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         id = event.button.id
@@ -376,22 +465,37 @@ class wavrun(App):
         elif id == "repeat":
             await self.action_repeat()
 
-    async def on_input_submitted(self, message: Input.Submitted) -> None:
+    # FIXED: Handle search as-you-type instead of on submit
+    async def on_input_changed(self, message: Input.Changed) -> None:
+        """NEW: Filter playlist as user types"""
+        if message.input.id != "search":
+            return
+            
         term = message.value.strip().lower()
         if not term:
-            # clear filter
-            self.playlist = load_playlist_file()
+            # Restore full playlist
+            self.playlist = self.full_playlist.copy()
         else:
-            # filter by title or artist
-            pl = load_playlist_file()
-            self.playlist = [p for p in pl if term in (p.get("title","").lower() + " " + p.get("artist","").lower() + " " + p.get("path","").lower())]
+            # Filter by title or artist
+            self.playlist = [
+                p for p in self.full_playlist 
+                if term in (p.get("title","").lower() + " " + 
+                           p.get("artist","").lower() + " " + 
+                           os.path.basename(p.get("path","")).lower())
+            ]
         self._render_playlist()
+        self.status.update(f"Found {len(self.playlist)} songs")
+
+    async def on_input_submitted(self, message: Input.Submitted) -> None:
+        """REMOVED: No longer plays on Enter - just move focus back to list"""
+        if message.input.id == "search":
+            # Move focus to list view
+            self.list_view.focus()
 
     async def on_key(self, event: events.Key) -> None:
-        # allow Enter on focused list to play
-        if event.key == "enter":
-            if self.list_view.index is not None:
-                await self.action_play_index(self.list_view.index)
+        # REMOVED: Enter on list no longer needed since search doesn't submit
+        # Keep this for potential other key handling
+        pass
 
 
 def run_tui():
