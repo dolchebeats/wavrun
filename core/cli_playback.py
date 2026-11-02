@@ -56,6 +56,7 @@ class wavrun(App):
         
         # NEW: Track currently playing song by path instead of index
         self.current_song_path = None
+        self.current_song_length = None
         self.last_index = self.cfg.get("last_index", 0)
         
         self.playing = False
@@ -201,6 +202,7 @@ class wavrun(App):
         path = self.playlist[idx]["path"]
         # Update currently playing song path
         self.current_song_path = path
+        self.current_song_length = self.playlist[idx].get("length")
         
         logging.debug(f"_play_index called for idx={idx}, path={path}, from_thread={from_thread}")
         
@@ -448,10 +450,10 @@ class wavrun(App):
                     pos_ms = self.player.get_pos()
                     len_ms = self.player.get_length()
                     pos_s = (pos_ms/1000.0) if pos_ms else 0.0
-                    len_s = (len_ms/1000.0) if len_ms else None
-                    pct = int((pos_s/len_s)*100) if len_s and len_s>0 else 0
+                    total_s = self.current_song_length if self.current_song_length is not None else None
+                    pct = int((pos_s / total_s) * 100) if total_s else 0
                     # update UI
-                    self.call_from_thread(lambda: self._update_progress_ui(pos_s, len_s, pct))
+                    self.call_from_thread(lambda: self._update_progress_ui(pos_s, pct))
                 
                 # FIXED: Check end event and handle song advancement
                 if self.song_end_flag.is_set():
@@ -558,14 +560,16 @@ class wavrun(App):
             self._play_index(next_idx_full, from_thread=False)
             self.playlist = old_playlist
 
-    def _update_progress_ui(self, pos_s, len_s, pct):
+    def _update_progress_ui(self, pos_s, pct):
         self.lbl_pos.update(format_time(pos_s))
-        if len_s:
-            self.lbl_len.update(format_time(len_s))
-            self.progress.progress = pct  # FIXED: Set attribute instead of calling update()
+
+        total_s = self.current_song_length if self.current_song_length is not None else None
+        if total_s:
+            self.lbl_len.update(format_time(total_s))
         else:
             self.lbl_len.update("??:??")
-            self.progress.progress = 0  # FIXED: Set attribute instead of calling update()
+
+        self.progress.progress = pct
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         id = event.button.id

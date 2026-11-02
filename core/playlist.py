@@ -15,7 +15,7 @@ def scan_folder(folder, exts=None):
             if fn.lower().endswith(exts):
                 path = os.path.join(root, fn)
                 meta = get_metadata(path)
-                entry = {"path": path, "title": meta["title"], "artist": meta["artist"], "rating": 0}
+                entry = {"path": path, "title": meta["title"], "artist": meta["artist"], "rating": 0, "length": meta["length"]}
                 song_files.append(entry)
 
     #song_files.sort()
@@ -25,7 +25,7 @@ def make_playlist_from_paths(paths):
     pl = []
     for p in paths:
         meta = get_metadata(p)
-        pl.append({"path": p, "title": meta["title"], "artist": meta["artist"], "rating": 0})
+        pl.append({"path": p, "title": meta["title"], "artist": meta["artist"], "rating": 0, "length": meta["length"]})
     return pl
 
 def load_playlist_file():
