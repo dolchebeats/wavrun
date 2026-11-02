@@ -450,6 +450,8 @@ class wavrun(App):
                     pos_ms = self.player.get_pos()
                     len_ms = self.player.get_length()
                     pos_s = (pos_ms/1000.0) if pos_ms else 0.0
+                    if len_ms and len_ms > 0:
+                        self.current_song_length = len_ms / 1000.0
                     total_s = self.current_song_length if self.current_song_length is not None else None
                     pct = int((pos_s / total_s) * 100) if total_s else 0
                     # update UI
@@ -474,7 +476,7 @@ class wavrun(App):
                                 def replay():
                                     old_pl = self.playlist
                                     self.playlist = self.full_playlist
-                                    self._play_index(idx_full, from_thread=True)
+                                    self._play_index(idx_full, from_thread=False)
                                     self.playlist = old_pl
                                 self.call_from_thread(replay)
                     else:
