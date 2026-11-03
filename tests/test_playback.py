@@ -1,6 +1,7 @@
 import logging
 import tempfile
 import unittest
+import wave
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ with patch.object(logging, "basicConfig"):
     from core import cli_playback
 from core.player import VLCMusic
 from core.playlist import scan_folder
+from core.metadata import get_metadata
 
 
 class PlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -74,7 +76,7 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_folder_change_stops_and_resets_before_saving(self):
         await self.app.action_play_pause()
-        self.app.song_end_flag.set()
+        old_end_callback = self.player.add_end_callback.call_args.args[0]
         self.app.progress.progress = 75
         with tempfile.TemporaryDirectory() as empty_folder:
             await self.app.apply_folder(empty_folder)
@@ -83,7 +85,9 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.app.paused)
         self.assertIsNone(self.app.current_song_path)
         self.assertIsNone(self.app.current_song_length)
-        self.assertFalse(self.app.song_end_flag.is_set())
+        old_end_callback()
+        await self.pilot.pause()
+        self.assertFalse(self.app.playing)
         self.assertEqual(self.app.progress.progress, 0)
         self.assertEqual(self.app.full_playlist, [])
         self.save_playlist.assert_called_once_with([])
@@ -133,7 +137,6 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         await self.pilot.pause()
         self.assertFalse(self.app.playing)
         self.assertFalse(self.app.paused)
-        self.assertFalse(self.app.song_end_flag.is_set())
         self.assertEqual(self.player.play.call_count, 1)
 
     async def test_old_error_notification_does_not_stop_new_track(self):
@@ -145,8 +148,127 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.app.playing)
         self.assertEqual(self.app.current_song_path, self.songs[0]["path"])
 
+    async def test_filtered_auto_advance_keeps_view_and_clears_highlight(self):
+        self.app.search.value = "first"
+        await self.pilot.pause()
+        await self.app.action_play_index(0)
+        self.player.add_end_callback.call_args.args[0]()
+        await self.pilot.pause()
+        self.assertEqual(self.app.playlist, [self.songs[0]])
+        self.assertEqual(self.app.current_song_path, self.songs[1]["path"])
+        self.assertIsNone(self.app.list_view.index)
+        self.assertIn("not in filter", str(self.app.lbl_title.render()))
+        await self.app.action_clear_search()
+        await self.pilot.pause()
+        self.assertEqual(self.app.list_view.index, 1)
+        self.assertEqual(str(self.app.lbl_title.render()), "second")
+
+    async def test_repeat_hidden_track_preserves_filter(self):
+        self.app.search.value = "first"
+        await self.pilot.pause()
+        await self.app.action_play_pause()
+        self.app.repeat_mode = "one"
+        self.player.add_end_callback.call_args.args[0]()
+        await self.pilot.pause()
+        self.assertEqual(self.app.playlist, [self.songs[0]])
+        self.assertEqual(self.app.current_song_path, self.songs[1]["path"])
+        self.assertIsNone(self.app.list_view.index)
+        self.assertEqual(self.player.play.call_count, 2)
+
+    async def test_filtering_while_paused_keeps_play_control(self):
+        await self.app.action_play_pause()
+        await self.app.action_play_pause()
+        self.app.search.value = "first"
+        await self.pilot.pause()
+        self.assertTrue(self.app.paused)
+        self.assertEqual(str(self.app.btn_play.label), "\u25b6")
+
+    async def test_missing_files_stop_with_repeat_and_shuffle(self):
+        for song in self.songs:
+            Path(song["path"]).unlink()
+        for shuffle in (False, True):
+            with self.subTest(shuffle=shuffle):
+                self.app.shuffle = shuffle
+                self.app.repeat_mode = "all"
+                await self.app.action_play_index(0)
+                await self.pilot.pause()
+                self.assertFalse(self.app.playing)
+                self.assertIn("No playable files", str(self.app.status.render()))
+        self.player.play.assert_not_called()
+
+    async def test_missing_files_skip_to_existing_track_even_with_shuffle(self):
+        Path(self.songs[0]["path"]).unlink()
+        self.app.shuffle = True
+        self.app.repeat_mode = "all"
+        await self.app.action_play_index(0)
+        self.player.load.assert_called_once_with(self.songs[1]["path"])
+        self.assertTrue(self.app.playing)
+
+    async def test_auto_advance_skips_missing_hidden_song_in_full_library(self):
+        third = dict(self.songs[1], path=self.songs[1]["path"] + ".missing", title="missing")
+        self.app.full_playlist.insert(1, third)
+        self.app.search.value = "first"
+        await self.pilot.pause()
+        await self.app.action_play_index(0)
+        self.player.add_end_callback.call_args.args[0]()
+        await self.pilot.pause()
+        self.assertEqual(self.app.current_song_path, self.songs[1]["path"])
+        self.assertEqual(self.app.playlist, [self.songs[0]])
+
+    async def test_pending_end_event_does_not_skip_new_selection(self):
+        await self.app.action_play_pause()
+        end_callback = self.player.add_end_callback.call_args.args[0]
+        end_callback()  # Queued before the user selects a new song.
+        await self.app.action_play_index(0)
+        end_callback()  # A delayed callback from the same old playback.
+        await self.pilot.pause()
+        self.assertEqual(self.app.current_song_path, self.songs[0]["path"])
+        self.assertEqual(self.player.play.call_count, 2)
+
+    async def test_duplicate_end_event_advances_only_once(self):
+        await self.app.action_play_index(0)
+        end_callback = self.player.add_end_callback.call_args.args[0]
+        end_callback()
+        end_callback()
+        await self.pilot.pause()
+        self.assertTrue(self.app.playing)
+        self.assertEqual(self.app.current_song_path, self.songs[1]["path"])
+        self.assertEqual(self.player.play.call_count, 2)
+
+    async def test_folder_change_preserves_and_reapplies_search(self):
+        self.app.search.value = "second"
+        await self.pilot.pause()
+        replacement = [dict(song, title="new " + song["title"]) for song in self.songs]
+        with patch.object(cli_playback, "scan_folder", return_value=replacement):
+            await self.app.apply_folder("new folder")
+        await self.pilot.pause()
+        self.assertEqual(self.app.search.value, "second")
+        self.assertEqual(self.app.playlist, [replacement[1]])
+        self.assertEqual(self.app.full_playlist, replacement)
+        self.save_playlist.assert_called_once_with(replacement)
+
+    async def test_folder_search_with_no_matches_shows_empty_view(self):
+        self.app.search.value = "not present"
+        await self.pilot.pause()
+        with patch.object(cli_playback, "scan_folder", return_value=self.songs.copy()):
+            await self.app.apply_folder("new folder")
+        await self.pilot.pause()
+        self.assertEqual(self.app.playlist, [])
+        self.assertEqual(self.app.full_playlist, self.songs)
+
 
 class BackendTests(unittest.TestCase):
+    def test_untagged_wav_retains_duration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "plain.wav"
+            with wave.open(str(path), "wb") as audio:
+                audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\0\0" * 8000)
+            metadata = get_metadata(path)
+            self.assertEqual(metadata["title"], "plain.wav")
+            self.assertEqual(metadata["artist"], "Unknown")
+            self.assertAlmostEqual(metadata["length"], 1.0)
+
     def test_vlc_rejected_play_raises(self):
         with patch("core.player.vlc.Instance") as instance:
             backend = VLCMusic()

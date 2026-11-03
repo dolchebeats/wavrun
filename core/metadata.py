@@ -14,7 +14,7 @@ def get_metadata(filepath):
     if HAS_MUTAGEN:
         try:
             audio = MutagenFile(filepath, easy=True)
-            if audio:
+            if audio is not None:
                 t = audio.get("title") or audio.get("TIT2") or audio.get("TITLE")
                 a = audio.get("artist") or audio.get("TPE1") or audio.get("ARTIST")
                 if t:
