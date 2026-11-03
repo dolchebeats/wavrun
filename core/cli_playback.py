@@ -32,6 +32,11 @@ class SongSelected(Message):
         self.index = index
         super().__init__()
 
+class PlaybackFailed(Message):
+    def __init__(self, generation: int):
+        self.generation = generation
+        super().__init__()
+
 class wavrun(App):
 
     CSS_PATH = "wavrun.css"
@@ -71,6 +76,7 @@ class wavrun(App):
         self.progress_updater = None
         self.stop_threads = False
         self._lock = threading.Lock()  # Thread safety
+        self._playback_generation = 0
 
 
 
@@ -100,11 +106,11 @@ class wavrun(App):
                 yield self.list_view
             # center now playing and controls
             with Vertical(id="now_panel"):
-                self.lbl_title = Label("No song selected", id="title")
+                self.lbl_title = Label("No song selected", id="title", markup=False)
                 yield self.lbl_title
-                self.lbl_artist = Label("", id="artist")
+                self.lbl_artist = Label("", id="artist", markup=False)
                 yield self.lbl_artist
-                self.progress = ProgressBar(total=100)
+                self.progress = ProgressBar(total=100, show_percentage=False)
                 yield self.progress
                 # time labels
                 with Horizontal():
@@ -166,7 +172,7 @@ class wavrun(App):
             title = item.get("title") or os.path.basename(item["path"])
             artist = item.get("artist") or "Unknown"
             label = f"{i + 1:02d}. {title} — {artist}"
-            node = ListItem(Label(label))
+            node = ListItem(Label(label, markup=False))
             node.song_index = i
             node.song = item
             self.list_view.append(node)
@@ -189,20 +195,22 @@ class wavrun(App):
         self.current_song_path = self.playlist[idx]["path"]
         self._play_index(idx)
 
-    def _play_index(self, idx:int, from_thread=False):
+    def _play_index(self, idx:int, from_thread=False, playlist=None):
         """Play song at given index. Thread-safe.
         
         Args:
-            idx: Index of song to play IN CURRENT PLAYLIST (may be filtered)
+            idx: Index of song to play in the supplied or current playlist
             from_thread: True if called from background thread, False if from UI thread
+            playlist: Optional source for a saved track hidden by the current filter
         """
-        if idx < 0 or idx >= len(self.playlist):
+        source = self.playlist if playlist is None else playlist
+        if idx < 0 or idx >= len(source):
             return
             
-        path = self.playlist[idx]["path"]
+        path = source[idx]["path"]
         # Update currently playing song path
         self.current_song_path = path
-        self.current_song_length = self.playlist[idx].get("length")
+        self.current_song_length = source[idx].get("length")
         
         logging.debug(f"_play_index called for idx={idx}, path={path}, from_thread={from_thread}")
         
@@ -215,24 +223,33 @@ class wavrun(App):
                 asyncio.create_task(self.action_next())
             return
             
-        with self._lock:
-            self.player.stop()
-            time.sleep(0.02)
-            self.player.load(path)
-            
-            # Register callback BEFORE playing
-            def on_end():
-                logging.debug("End callback triggered by VLC!")
-                self.song_end_flag.set()
-            
-            self.player.add_end_callback(on_end)
-            logging.debug(f"End callback registered")
-            
-            self.player.play()
-            
-            # Update state
-            self.playing = True
-            self.paused = False
+        try:
+            with self._lock:
+                self._playback_generation += 1
+                generation = self._playback_generation
+                self.player.stop()
+                self.song_end_flag.clear()
+                time.sleep(0.02)
+                self.player.load(path)
+
+                def on_end():
+                    if generation == self._playback_generation:
+                        self.song_end_flag.set()
+
+                self.player.add_end_callback(on_end)
+                self.player.add_error_callback(
+                    lambda: self.post_message(PlaybackFailed(generation))
+                )
+                self.player.play()
+                self.playing = True
+                self.paused = False
+        except Exception:
+            logging.exception("Unable to play %s", path)
+            if from_thread:
+                self.call_from_thread(self._handle_playback_failure)
+            else:
+                self._handle_playback_failure()
+            return
             
         # Update UI - use call_from_thread only if we're in a background thread
         if from_thread:
@@ -256,22 +273,41 @@ class wavrun(App):
     def _handle_song_end(self):
         self.song_end_flag.set()
 
+    def on_playback_failed(self, message: PlaybackFailed):
+        if message.generation == self._playback_generation:
+            self._handle_playback_failure()
+
+    def _handle_playback_failure(self):
+        # Stay stopped so repeat/shuffle cannot loop forever over broken files.
+        self._playback_generation += 1
+        self.player.stop()
+        self.song_end_flag.clear()
+        self.playing = False
+        self.paused = False
+        self.btn_play.label = "\u25b6"
+        self.status.update("Playback failed; select another track or retry")
+
     async def action_play_pause(self):
         if self.playing:
             self.player.pause()
             self.playing = False
             self.paused = True
             self.btn_play.label = "▶"
-        else:
-            if not self.current_song_path and self.playlist:
-                # No song playing - start with first song in current playlist
-                self.current_song_path = self.playlist[0]["path"]
-                self._play_index(0)
-            else:
+        elif self.paused:
+            try:
                 self.player.unpause()
                 self.playing = True
                 self.paused = False
                 self.btn_play.label = "⏸"
+            except Exception:
+                logging.exception("Unable to resume playback")
+                self._handle_playback_failure()
+        else:
+            idx = self._find_song_in_full_playlist(self.current_song_path)
+            if idx >= 0:
+                self._play_index(idx, playlist=self.full_playlist)
+            elif self.playlist:
+                self._play_index(0)
 
     async def action_next(self):
         if not self.playlist:
@@ -357,15 +393,34 @@ class wavrun(App):
     async def apply_folder(self, path):
         if not path:
             return
-        self.music_dir = path
         try:
-            self.playlist = scan_folder(self.music_dir)
-            self.full_playlist = self.playlist.copy()
+            playlist = scan_folder(path)
         except Exception as e:
+            logging.exception("Unable to scan music folder %s", path)
+            self.status.update("Unable to read music folder; library unchanged")
             return
-        await self.action_save()
-        self.current_song_path = None  # Reset currently playing song
+
+        with self._lock:
+            self._playback_generation += 1
+            self.player.stop()
+            self.song_end_flag.clear()
+            self.playing = False
+            self.paused = False
+            self.current_song_path = None
+            self.current_song_length = None
+            self.music_dir = path
+            self.playlist = playlist
+            self.full_playlist = playlist.copy()
+        self.btn_play.label = "\u25b6"
+        self.lbl_title.update("No song selected")
+        self.lbl_artist.update("")
+        self.lbl_pos.update("00:00")
+        self.lbl_len.update("00:00")
+        self.progress.progress = 0
+        self.search.value = ""
         self._render_playlist()
+        self.status.update(f"Loaded {len(playlist)} songs")
+        await self.action_save()
         return
 
     async def action_quit(self):
@@ -406,6 +461,7 @@ class wavrun(App):
 
     def _update_ui_playing(self):
         logging.debug(f"_update_ui_playing called, current_song_path: {self.current_song_path}")
+        self.status.update("Playing")
         
         # Find the song in current playlist by path
         current_idx = self._get_current_index()
@@ -450,7 +506,7 @@ class wavrun(App):
                     pos_ms = self.player.get_pos()
                     len_ms = self.player.get_length()
                     pos_s = (pos_ms/1000.0) if pos_ms else 0.0
-                    if len_ms and len_ms > 0:
+                    if self.current_song_length is None and len_ms and len_ms > 0:
                         self.current_song_length = len_ms / 1000.0
                     total_s = self.current_song_length if self.current_song_length is not None else None
                     pct = int((pos_s / total_s) * 100) if total_s else 0

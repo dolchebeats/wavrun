@@ -7,10 +7,17 @@ from .metadata import get_metadata
 PLAYLIST_FILE = Path("config/playlist.json")
 
 def scan_folder(folder, exts=None):
+    if not os.path.isdir(folder):
+        raise NotADirectoryError(f"Music folder is not a directory: {folder}")
+
+    def raise_scan_error(error):
+        # Do not replace a saved library with a partial scan of an unreadable folder.
+        raise error
+
     if exts is None:
         exts = (".mp3", ".flac", ".wav", ".ogg", ".m4a")
     song_files = []
-    for root, dirs, files in os.walk(folder):
+    for root, dirs, files in os.walk(folder, onerror=raise_scan_error):
         for fn in files:
             if fn.lower().endswith(exts):
                 path = os.path.join(root, fn)

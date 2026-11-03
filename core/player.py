@@ -11,6 +11,7 @@ class VLCMusic:
         self.player = self.instance.media_player_new()
         self.current_media = None
         self._end_callback = None
+        self._error_callback = None
         self._events_attached = False
         self.set_volume(0.7)
         
@@ -18,6 +19,7 @@ class VLCMusic:
         try:
             em = self.player.event_manager()
             em.event_attach(vlc.EventType.MediaPlayerEndReached, self._vlc_end_event)
+            em.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._vlc_error_event)
             self._events_attached = True
             logging.debug("VLC: End event handler attached successfully")
         except Exception as e:
@@ -31,7 +33,8 @@ class VLCMusic:
         logging.debug(f"VLC: Loaded media: {filepath}")
     
     def play(self):
-        self.player.play()
+        if self.player.play() == -1:
+            raise RuntimeError("VLC could not start playback")
         time.sleep(0.05)
         logging.debug("VLC: Started playback")
     
@@ -82,6 +85,18 @@ class VLCMusic:
         """Register a callback to be called when song ends"""
         self._end_callback = callback
         logging.debug(f"VLC: End callback registered")
+
+    def add_error_callback(self, callback):
+        """Register a callback for asynchronous VLC playback failures."""
+        self._error_callback = callback
+
+    def _vlc_error_event(self, event):
+        logging.error("VLC: MediaPlayerEncounteredError")
+        if callable(self._error_callback):
+            try:
+                self._error_callback()
+            except Exception:
+                logging.exception("VLC: Error in playback error callback")
     
     def _vlc_end_event(self, event):
         """Called by VLC event thread when media ends"""
