@@ -2,13 +2,15 @@
 import json
 import logging
 from pathlib import Path
-from .storage import APP_DIR, CONFIG_DIR, atomic_write_json
+import math
+from .storage import CONFIG_DIR, LEGACY_CONFIG_DIR, atomic_write_json, settings_source
 
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 def load_config():
+    source = settings_source(CONFIG_FILE, "config.json")
     try:
-        with CONFIG_FILE.open(encoding="utf-8") as stream:
+        with source.open(encoding="utf-8") as stream:
             cfg = json.load(stream)
         if not isinstance(cfg, dict):
             raise ValueError("Config must be an object")
@@ -22,9 +24,16 @@ def load_config():
     folder = cfg.get("music_dir")
     if isinstance(folder, str) and folder.strip() and "\0" not in folder:
         path = Path(folder).expanduser()
-        cfg["music_dir"] = str(path if path.is_absolute() else APP_DIR / path)
+        base = LEGACY_CONFIG_DIR.parent if source.parent == LEGACY_CONFIG_DIR else source.parent
+        cfg["music_dir"] = str(path if path.is_absolute() else base / path)
     else:
         cfg["music_dir"] = None
+    volume = cfg.get("volume", 0.7)
+    try:
+        cfg["volume"] = (float(volume) if type(volume) in (int, float) and
+                         math.isfinite(volume) and 0 <= volume <= 1 else 0.7)
+    except OverflowError:
+        cfg["volume"] = 0.7
     return cfg
 
 def save_config(new_cfg: dict):

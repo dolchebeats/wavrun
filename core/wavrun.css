@@ -1,3 +1,30 @@
+#main {
+    height: 1fr;
+}
+#playlist_panel {
+    width: 45%;
+}
+#now_panel {
+    width: 55%;
+    padding: 0 1;
+}
+#time_row {
+    height: 1;
+}
+#time_row Label {
+    width: 1fr;
+}
+#controls {
+    height: 3;
+}
+#controls Button {
+    width: auto;
+    min-width: 3;
+    padding: 0 1;
+}
+#bottom {
+    height: 3;
+}
 #status {
     width: 30%;
     min-width: 20;

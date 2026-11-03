@@ -1,0 +1,4 @@
+# Shared native playback dependencies for the TUI and standalone audio CLI.
+av>=19.0.2,<20
+numpy>=2.4,<3
+sounddevice>=0.5.6,<0.6

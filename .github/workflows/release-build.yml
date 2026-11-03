@@ -1,0 +1,31 @@
+name: Build terminal bundles
+on: [workflow_dispatch]
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux audio runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      - run: python -m pip install --only-binary=:all: -r requirements-build.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/build_release.py
+      - if: runner.os == 'Windows'
+        run: python scripts/smoke_release.py dist/wavrun/wavrun.exe
+      - if: runner.os != 'Windows'
+        run: python scripts/smoke_release.py dist/wavrun/wavrun
+      - name: Archive directory bundle preserving symlinks
+        shell: bash
+        run: tar -czf wavrun-${{ runner.os }}-${{ runner.arch }}.tar.gz -C dist wavrun
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wavrun-${{ runner.os }}-${{ runner.arch }}
+          path: wavrun-*.tar.gz

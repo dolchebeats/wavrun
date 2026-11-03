@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from core.background import background_read
-from core.player import VLCMusic
 from core.playlist import ScanCancelled, scan_folder
 from core.storage import APP_DIR
 
@@ -56,7 +55,7 @@ def blocked_scan(folder, cancel_event=None):
     threading.Event().wait(3600)
 async def main():
     player = Mock()
-    with patch.object(cli_playback, 'VLCMusic', return_value=player), \\
+    with patch.object(cli_playback, 'AudioPlayer', return_value=player), \\
          patch.object(cli_playback, 'load_config', return_value={'music_dir': '.'}), \\
          patch.object(cli_playback, 'load_playlist_file', return_value=[]), \\
          patch.object(cli_playback, 'save_config'), \\
@@ -91,22 +90,6 @@ print('clean exit')
                 with self.assertRaises(ScanCancelled):
                     scan_folder(folder, cancel_event=cancelled)
             self.assertEqual(read.call_count, 1)
-
-    def test_vlc_resources_are_released_once_and_logs_go_to_file(self):
-        with patch("core.player.vlc.Instance") as instance:
-            backend = VLCMusic()
-            backend.load("first.mp3")
-            media = backend.current_media
-            backend.stop()
-            backend.close()
-            backend.close()
-            media.release.assert_called_once()
-            backend.player.release.assert_called_once()
-            backend.instance.release.assert_called_once()
-            self.assertIn('--no-plugins-cache', instance.call_args.args)
-            self.assertIn('--file-logging', instance.call_args.args)
-            self.assertIn(f'--logfile={APP_DIR / "vlc_debug.log"}', instance.call_args.args)
-
 
 if __name__ == "__main__":
     unittest.main()

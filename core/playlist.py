@@ -5,9 +5,9 @@ import logging
 import math
 from pathlib import Path
 from .metadata import get_metadata
-from .storage import APP_DIR, CONFIG_DIR, atomic_write_json
+from .storage import DATA_DIR, LEGACY_CONFIG_DIR, atomic_write_json, settings_source
 
-PLAYLIST_FILE = CONFIG_DIR / "playlist.json"
+PLAYLIST_FILE = DATA_DIR / "playlist.json"
 
 class ScanCancelled(Exception):
     """A read-only scan was superseded or the application is shutting down."""
@@ -52,8 +52,9 @@ def make_playlist_from_paths(paths):
     return pl
 
 def load_playlist_file():
+    source = settings_source(PLAYLIST_FILE, "playlist.json")
     try:
-        with PLAYLIST_FILE.open(encoding="utf-8") as stream:
+        with source.open(encoding="utf-8") as stream:
             entries = json.load(stream)
         if not isinstance(entries, list):
             raise ValueError("Playlist must be a list")
@@ -71,7 +72,8 @@ def load_playlist_file():
         if not entry["path"].strip() or "\0" in entry["path"]:
             continue
         path = Path(entry["path"]).expanduser()
-        path = str(path if path.is_absolute() else APP_DIR / path)
+        base = LEGACY_CONFIG_DIR.parent if source.parent == LEGACY_CONFIG_DIR else source.parent
+        path = str(path if path.is_absolute() else base / path)
         if path in seen:
             continue
         seen.add(path)

@@ -1,0 +1,19 @@
+name: Audio prototype
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  prototype:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        python: ['3.12', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      - run: python -m pip install --only-binary=:all: -r requirements.txt
+      - run: python -m unittest discover -s tests -v
