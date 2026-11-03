@@ -1,7 +1,5 @@
 # core/player.py - DEBUG VERSION
 import vlc
-import time
-import threading
 import logging
 
 class VLCMusic:
@@ -35,7 +33,6 @@ class VLCMusic:
     def play(self):
         if self.player.play() == -1:
             raise RuntimeError("VLC could not start playback")
-        time.sleep(0.05)
         logging.debug("VLC: Started playback")
     
     def pause(self):
