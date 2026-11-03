@@ -8,14 +8,17 @@ from pathlib import Path
 
 
 import asyncio
+import threading
 import random, os
 import logging
 
 from .player import VLCMusic
-from .playlist import load_playlist_file, save_playlist_file, scan_folder
+from .playlist import load_playlist_file, save_playlist_file, scan_folder, ScanCancelled
+from .background import background_read
 from .common import format_time
 from .config import load_config, save_config
 from .storage import APP_DIR
+from .splash import show_splash
 
 class SongSelected(Message):
     def __init__(self, index: int):
@@ -72,6 +75,7 @@ class wavrun(App):
         self._lock = asyncio.Lock()
         self._save_lock = asyncio.Lock()
         self._scan_generation = 0
+        self._scan_cancellations = set()
         self._active_scan_generation = None
         self._playback_generation = 0
         self._playlist_generation = 0
@@ -217,7 +221,7 @@ class wavrun(App):
         elif self.repeat_mode == "all":
             remaining += list(range(idx))
         generation = self._playback_generation = self._playback_generation + 1
-        idx = await asyncio.to_thread(
+        idx = await background_read(
             lambda: next((i for i in [idx] + remaining
                           if os.path.isfile(source[i]["path"])), None))
         if generation != self._playback_generation:
@@ -388,17 +392,28 @@ class wavrun(App):
             return
         self._scan_generation += 1
         scan_generation = self._scan_generation
+        for pending in self._scan_cancellations:
+            pending.set()
+        cancel_scan = threading.Event()
+        self._scan_cancellations.add(cancel_scan)
         self._active_scan_generation = scan_generation
         self._set_status("")
         def scan():
             folder = str(Path(path).expanduser().resolve())
-            return folder, scan_folder(folder)
+            return folder, scan_folder(folder, cancel_event=cancel_scan)
         try:
-            path, playlist = await asyncio.to_thread(scan)
+            path, playlist = await background_read(scan, cancel_scan)
+        except ScanCancelled:
+            if self._active_scan_generation == scan_generation:
+                self._active_scan_generation = None
+                if not self.stop_threads:
+                    self._set_status("Folder scan cancelled")
+            return
         except asyncio.CancelledError:
             if self._active_scan_generation == scan_generation:
                 self._active_scan_generation = None
-                self._set_status("Folder scan cancelled")
+                if not self.stop_threads:
+                    self._set_status("Folder scan cancelled")
             raise
         except Exception:
             logging.exception("Unable to scan music folder %s", path)
@@ -406,6 +421,8 @@ class wavrun(App):
                 self._active_scan_generation = None
                 self._set_status("Unable to read music folder; library unchanged")
             return
+        finally:
+            self._scan_cancellations.discard(cancel_scan)
         if scan_generation != self._scan_generation or self.stop_threads:
             return
         self._active_scan_generation = None
@@ -442,12 +459,15 @@ class wavrun(App):
 
     async def action_save_and_exit(self):
         self.stop_threads = True
+        for pending in self._scan_cancellations:
+            pending.set()
         self._scan_generation += 1
         self._active_scan_generation = None
         if not await self.action_save():
             self.stop_threads = False
             return
         await self._stop_playback()
+        await self._audio(self.player.close)
         self.exit()
 
     async def action_save(self):
@@ -514,8 +534,12 @@ class wavrun(App):
             return
         generation = self._playback_generation
         try:
+            def read_progress():
+                if self.stop_threads or generation != self._playback_generation:
+                    return 0, None
+                return self.player.get_pos(), self.player.get_length()
             pos_ms, len_ms = await self._audio(
-                lambda: (self.player.get_pos(), self.player.get_length()))
+                read_progress)
             if generation != self._playback_generation or not self.playing:
                 return
             if self.current_song_length is None and len_ms and len_ms > 0:
@@ -633,5 +657,6 @@ class wavrun(App):
 def run_tui():
     logging.basicConfig(filename=APP_DIR / "wavrun_debug.log", level=logging.DEBUG,
                         format='%(asctime)s [%(threadName)s] %(message)s')
+    show_splash()
     app = wavrun()
     app.run()

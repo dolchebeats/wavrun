@@ -9,7 +9,16 @@ from .storage import APP_DIR, CONFIG_DIR, atomic_write_json
 
 PLAYLIST_FILE = CONFIG_DIR / "playlist.json"
 
-def scan_folder(folder, exts=None):
+class ScanCancelled(Exception):
+    """A read-only scan was superseded or the application is shutting down."""
+
+
+def scan_folder(folder, exts=None, cancel_event=None):
+    def check_cancelled():
+        if cancel_event is not None and cancel_event.is_set():
+            raise ScanCancelled()
+
+    check_cancelled()
     folder = Path(folder).expanduser().resolve()
     if not os.path.isdir(folder):
         raise NotADirectoryError(f"Music folder is not a directory: {folder}")
@@ -22,10 +31,13 @@ def scan_folder(folder, exts=None):
         exts = (".mp3", ".flac", ".wav", ".ogg", ".m4a")
     song_files = []
     for root, dirs, files in os.walk(folder, onerror=raise_scan_error):
+        check_cancelled()
         for fn in files:
+            check_cancelled()
             if fn.lower().endswith(exts):
                 path = os.path.join(root, fn)
                 meta = get_metadata(path)
+                check_cancelled()
                 entry = {"path": path, "title": meta["title"], "artist": meta["artist"], "rating": 0, "length": meta["length"]}
                 song_files.append(entry)
 

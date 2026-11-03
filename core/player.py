@@ -1,15 +1,20 @@
 # core/player.py - DEBUG VERSION
 import vlc
 import logging
+from .storage import APP_DIR
 
 class VLCMusic:
     """VLC wrapper for audio playback."""
     def __init__(self):
-        self.instance = vlc.Instance('--no-xlib', '--no-video')  # no video
+        self.instance = vlc.Instance(
+            '--no-xlib', '--no-video', '--no-plugins-cache', '--file-logging',
+            f'--logfile={APP_DIR / "vlc_debug.log"}'
+        )
         self.player = self.instance.media_player_new()
         self.current_media = None
         self._end_callback = None
         self._error_callback = None
+        self._closed = False
         self._events_attached = False
         self.set_volume(0.7)
         
@@ -27,7 +32,10 @@ class VLCMusic:
     def load(self, filepath):
         media = self.instance.media_new(str(filepath))
         self.player.set_media(media)
+        previous = self.current_media
         self.current_media = media
+        if previous is not None:
+            previous.release()
         logging.debug(f"VLC: Loaded media: {filepath}")
     
     def play(self):
@@ -58,6 +66,23 @@ class VLCMusic:
             self._volume = vol
         except Exception:
             pass
+
+    def close(self):
+        """Release native VLC resources after playback has stopped."""
+        if self._closed:
+            return
+        self._closed = True
+        self._end_callback = None
+        self._error_callback = None
+        if self._events_attached:
+            manager = self.player.event_manager()
+            manager.event_detach(vlc.EventType.MediaPlayerEndReached)
+            manager.event_detach(vlc.EventType.MediaPlayerEncounteredError)
+        self.player.release()
+        if self.current_media is not None:
+            self.current_media.release()
+            self.current_media = None
+        self.instance.release()
     
     def get_busy(self):
         try:
